@@ -11,10 +11,13 @@ library(destiny)
 library(SLICER)
 
 # Questions: can't access to ouija
-#BiocManager::install("ouija")
+#solution-1: failed
+BiocManager::install("ouija")
 # not available
-#install.packages("devtools")
-#devtools::install_github("kieranrcampbell/ouija")
+
+#solution-2: it works, I am going to continue to work on it.
+install.packages("devtools")
+devtools::install_github("kieranrcampbell/ouija")
 library(ouija)
 
 library(scater)
