@@ -1,0 +1,361 @@
+setwd("/Users/suifangmao/Chapter 8")
+
+#solution-1
+#source("https://bioconductor.org/biocLite.R") 
+#biocLite("pcaMethods")
+#solution-2
+#BiocManager::install("pcaMethods")
+BiocManager::install("SC3")
+install.packages("ggplot2")
+BiocManager::install("stats")
+
+library(pcaMethods)
+library(SC3)
+library(scater)
+library(SingleCellExperiment)
+library(pheatmap)
+library(mclust)
+set.seed(1234567)
+
+deng <- readRDS("deng-reads.rds")
+deng # no "spikeNames(1): ERCC" 
+table(colData(deng)$cell_type2)
+
+#### 8.2 Clustering  ####
+
+#8.2.1 simple PCA analysis: need to run PCA
+plotdeng <- runPCA(
+  deng,
+  exprs_values = "logcounts"
+)
+plotPCA(plotdeng, colour_by = "cell_type2")
+
+#8.2.2 SC3
+deng <- sc3_estimate_k(deng)  # to estimate the value of k in "metadata(1): sc3"
+metadata(deng)$sc3$k_estimation
+plotPCA(plotdeng, colour_by = "cell_type1")
+# PCA output 12 clusters, whereas SC3 estimate 6.
+adjustedRandIndex(colData(deng)$cell_type2, colData(deng)$cell_type1)
+#[1] 0.5540851
+
+deng <- sc3(deng, ks = 10, biology = TRUE, n_cores = 1)
+#set up 10 clusters, 
+#compute differentially expressed genes, marker genes and cell outliers
+#define 1 core to be used on the machine
+
+#Error in unserialize(node$con) : error reading from connection
+#Calls: <Anonymous> -> slaveLoop -> makeSOCKmaster
+#Execution halted
+#Error in makePSOCKcluster(names = spec, ...) : 
+#  Cluster setup failed. 1 worker of 1 failed to connect.
+
+install.packages("devtools")
+devtools::install_github("hemberg-lab/SC3")
+library(SC3)
+
+#Consensus matrix
+sc3_plot_consensus(deng, k = 10, show_pdata = "cell_type2")
+#Silhouette plot:
+sc3_plot_silhouette(deng, k = 10)
+#identify marker genes
+sc3_plot_markers(deng, k = 10, show_pdata = "cell_type2")
+#PCA plot with highlighted SC3 clusters:
+plotdeng <- runPCA(
+  deng,
+  exprs_values = "logcounts"
+)
+plotPCA(plotdeng, colour_by = "sc3_10_clusters")
+
+#an interactive Shiny session of SC3
+deng <- sc3_kmeans(deng)
+
+sc3_calc_consens(deng)
+sc3_interactive(deng)
+#In sc3_interactive(deng) : Please run sc3_calc_consens() first!
+
+#8.2.3 tSNE + kmeans
+deng <- readRDS("deng-reads.rds")
+#remember:
+#library(ggplot2)
+#library(scater)
+deng <- runTSNE(deng, rand_seed = 1)
+plotTSNE(deng)
+#old code does not work
+#new code:
+colData(deng)$tSNE_kmeans <- as.character(kmeans(reducedDim(deng, "TSNE"), centers = 8)$clust)
+plotdeng <- runTSNE(deng, exprs_values = "logcounts")
+plotTSNE(plotdeng, colour_by = "tSNE_kmeans")
+
+
+#exercise 7
+colData(deng)$tSNE_kmeans <- as.character(kmeans(reducedDim(deng, "TSNE"), centers = 10)$clust)
+plotdeng <- runTSNE(deng)
+plotTSNE(plotdeng, colour_by = "tSNE_kmeans")
+
+#compared to origianl clustering (cell type2), the tSNE+K-means seperate the three blastocyst.
+#exercise 8:  increase perplexity to makes the network more sparse and cell more seperated
+
+plotdeng <- runTSNE(deng, exprs_values = "logcounts",perplexity = 50)
+plotTSNE(plotdeng, colour_by = "tSNE_kmeans")
+
+# comparing
+
+library(mclust)
+adjustedRandIndex(colData(deng)$cell_type2, colData(deng)$tSNE_kmeans)
+#0.4468302
+
+#8.2.4 SINCERA
+# use the same gene filter as in SC3
+input <- logcounts(deng[rowData(deng)$sc3_gene_filter, ])
+
+# perform gene-by-gene per-sample z-score transformation
+#need to install the scRNA.seq.funcs from github
+
+install.packages("remotes")
+remotes::install_github("hemberg-lab/scRNA.seq.funcs")
+
+dat <- apply(input, 1, function(y) scRNA.seq.funcs::z.transform.helper(y))
+
+## hierarchical clustering
+#1st step:
+#overall: Obtain a distance matrix of euclidean using dist(). 
+#To obtain a correlation-based distances, cor() together with t() computes correlations in row. 
+#as.dist() makes it a matrix.
+#t() allows to scale by rows
+#dist(): compute the distances between the rows of a data matrix by a method
+#cor(): compute the correlation of x and y, here (1-correlation) as the dissimilarity measures
+dd <- as.dist((1 - cor(t(dat), method = "pearson"))/2)
+
+#2nd step:Hierarchical cluster analysis on a set of dissimilarities and methods for analyzing it.
+#hclust(d):d is a dissimilarity structure as produced by dis
+hc <- hclust(dd, method = "average")
+#error: must have n >= 2 objects to cluster
+
+#3rd step:
+
+cutree(): cut the hclust results into several groups either by specifying the desired number(s) of groups or the cut height(s).
+
+num.singleton <- 0
+kk <- 1
+for (i in 2:dim(dat)[2]) {
+  clusters <- cutree(hc, k = i)
+  clustersizes <- as.data.frame(table(clusters))
+  singleton.clusters <- which(clustersizes$Freq < 2) #?what does Freq means? 
+  if (length(singleton.clusters) <= num.singleton) {
+    kk <- i
+  } else {
+    break;
+  }
+}
+cat(kk)
+
+pheatmap(
+  t(dat),
+  cluster_cols = hc,
+  cutree_cols = kk,
+  kmeans_k = 100,
+  show_rownames = FALSE
+)
+
+#Exercise: Is using the singleton cluster criteria for finding k a good idea?
+# I think yes.
+# clustering based on comparison to original data: tSNE+ k-means > SINCERA >SC3
+
+
+### 8.3 Feature Selection  ####
+
+# note for scRNA.seq.funcs
+# install.packages("remotes")
+# remotes::install_github("hemberg-lab/scRNA.seq.funcs")
+install.packages("numDeriv")
+library(scRNA.seq.funcs)
+library(matrixStats)
+library(M3Drop)
+library(RColorBrewer)
+library(SingleCellExperiment)
+set.seed(1)
+
+## 1st step
+deng <- readRDS("deng-reads.rds")
+celltype_labs <- colData(deng)$cell_type2
+# brewer.pal (n, name): creates nice looking color palettes especially for thematic maps. 
+# n: minimum is 3
+# name: "Set3" is Qualitative palettes
+cell_colors <- brewer.pal(max(3,length(unique(celltype_labs))), "Set3")
+
+
+### M3Drop ###
+# M3Drop::M3DropConvertData(): recognizes a R objects/classes and extracts expression matrix, 
+#         then converts to a normalized but not-log transformed matrix appropriate
+# is.log or is.counts: it can also remove undetected genes & normalizing/delogging
+expr_matrix <- M3Drop::M3DropConvertData(deng)
+length(expr_matrix)
+
+### 8.3.1 Identifying Genes vs a Null Model
+
+#   8.3.1.1 Highly Variable Genes
+## Rational: a positive relationship between the mean expression of a gene and the variance in the read counts across cells
+
+#install.packages("matrixStats")
+rowmean<- BiocGenerics::rowMeans(expr_matrix)
+rowvar <- matrixStats::rowVars(expr_matrix)
+plot(rowmean, rowvar, pch=16, cex=0.6, log="xy", xlab="Mean log-expression",
+     ylab="Variance of log-expression")
+
+## Correction for variance and mean expression
+## Brennecke_getVariableGenes(counts, spikes): here we use entir data set w/o Spike-ins
+## 1st step: normalize for library size
+## 2nd step: quadratic curve is fit to the relationship between these two variables for the ERCC spike-in
+## 3rd step: chi-square test is used to find genes significantly above the curve
+## return: returns a matrix of significant genes as well as their estimated effect size and significance
+#red line is the technical noise model and dashed line is the 95% CI
+Brennecke_HVG <- BrenneckeGetVariableGenes(
+  expr_matrix,
+  fdr = 0.01,
+  minBiolDisp = 0.5
+)
+HVG_genes <- Brennecke_HVG$Gene
+length(HVG_genes)
+#[1] 1303
+
+# 8.3.1.2 High Dropout Genes
+## Rational:HVGs is to identify genes with unexpectedly high numbers of zeros,
+## meaning highly-expressed genes has lower dropout rate
+# differentially expressed genes across two or more populations of cells will be shifted up/right
+K <- 49
+S_sim <- 10^seq(from = -3, to = 4, by = 0.05) # range of expression values
+MM <- 1 - S_sim / (K + S_sim) #Michaelis-Menten equation: S is mRNA concentration
+plot(
+  S_sim, 
+  MM,
+  type = "l", 
+  lwd = 3, 
+  xlab = "Expression", 
+  ylab = "Dropout Rate", 
+  xlim = c(1,1000)
+)
+
+#log in X-axis:
+# plot(
+#     S_sim, 
+#     MM,
+#     log="x",
+#     type = "l", 
+#     lwd = 3, 
+#     xlab = "Expression", 
+#     ylab = "Dropout Rate", 
+#     xlim = c(1,1000)
+#     )
+
+S1 <- 10 # Mean expression in population 1
+P1 <- 1 - S1 / (K + S1) # Dropouts for cells in condition 1
+S2 <- 750 # Mean expression in population 2
+P2 <- 1 - S2 / (K + S2) # Dropouts for cells in condition 2
+points(
+  c(S1, S2),
+  c(P1, P2), 
+  pch = 16, 
+  col = "grey85", 
+  cex = 3
+)
+mix <- 0.5 # proportion of cells in condition 1
+points(
+  S1 * mix + S2 * (1 - mix), 
+  P1 * mix + P2 * (1 - mix), 
+  pch = 16, 
+  col = "grey35", 
+  cex = 3
+)
+#exercise
+S1 <- 50 # Mean expression in population 1
+P1 <- 1 - S1 / (K + S1) # Dropouts for cells in condition 1
+points(S1, P1, pch = 16,col = "grey85", cex = 3)
+mix <- 0.7 # proportion of cells in condition 1
+points(
+  S1 * mix + S2 * (1 - mix), 
+  P1 * mix + P2 * (1 - mix), 
+  pch = 16, 
+  col = "grey35", 
+  cex = 3
+)
+# The large expressoin mean, the lower dropout rate
+# The smaller cell population%,  the lower dropout rate
+
+### Method 1 for dropout genes
+### M3Drop: identify significant outliers to the right of the MM curve. 
+##  We also apply 1% FDR multiple testing correction
+
+M3Drop_genes <- M3DropFeatureSelection(
+  expr_matrix,
+  mt_method = "fdr",
+  mt_threshold = 0.01
+)
+M3Drop_genes <- M3Drop_genes$Gene
+length(M3Drop_genes)
+#[1] 1635
+
+### Method 2 for undetected and dropout genes (UMI-tagged data, extract raw counts)
+### Depth-Adjusted Negative Binomial (DANB)
+
+deng_int <- NBumiConvertData(deng)
+#[1] "Removing  1134 undetected genes."
+# question: this step dropout dimilar # of undetected genes to M3Drop::M3DropConvertData
+
+DANB_fit <- NBumiFitModel(deng_int) # DANB is fit to the raw count matrix
+# Perform DANB feature selection
+DropFS <- NBumiFeatureSelectionCombinedDrop(DANB_fit, method="fdr", qval.thresh=0.01, suppress.plot=FALSE)
+DANB_genes <- DropFS[1:1500,]$Gene
+table(DropFS$p.value < 0.01)
+# TRUE 
+# 10694
+
+
+### 8.3.2 Correlated Expression
+# Rational: Genes which are expressed in the same cell-population will be positively correlated with each other 
+#           where as genes expressed in different cell-populations will be negatively correlated
+
+## Method-1: M3Drop::corFS
+cor_feat <- M3Drop::corFS(expr_matrix)  ## this process is very slow, I save the file
+#write.table(cor_feat, file="chapter_8_cor_feature")
+Cor_genes <- names(cor_feat)[1:1500]
+head(cor_feat)
+#  Rpl22l1 LOC100042049        Aldoa     Aldoart1         Actb       Akr1b8 
+#  -1.819928    -1.819066    -1.789668    -1.776650    -1.750988    -1.744321 
+
+## Method-2: PCA loadings
+## challenge: PCA loadings tend to be susceptible to detecting systematic variation due to batch effects
+
+# PCA is typically performed on log-transformed expression data
+pca <- prcomp(log(expr_matrix + 1) / log(2))
+
+# plot projection
+plot(
+  pca$rotation[,1], 
+  pca$rotation[,2], 
+  pch = 16, 
+  col = cell_colors[as.factor(celltype_labs)]
+)
+
+# calculate loadings for components 1 and 2
+score <- rowSums(abs(pca$x[,c(1,2)])) 
+names(score) <- rownames(expr_matrix)
+score <- score[order(-score)]
+PCA_genes <- names(score[1:1500])
+head(PCA_genes)
+
+###8.3.3 Comparing Methods
+
+M3DropExpressionHeatmap(
+  M3Drop_genes,
+  expr_matrix,
+  cell_labels = celltype_labs
+)
+
+M3DropExpressionHeatmap(
+  HVG_genes,
+  expr_matrix,
+  cell_labels = celltype_labs
+)
+#use the Jaccard index to compare feature selection method for higly variable genes
+J <- sum(M3Drop_genes %in% HVG_genes)/length(unique(c(M3Drop_genes, HVG_genes)))
+#[1] 0.3005755
